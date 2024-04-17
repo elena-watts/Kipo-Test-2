@@ -1,0 +1,467 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+---- Overview ----
+This script contains a set of functions developed by Elena Watts for the purpose of comparing sets of high precision U-Pb zircon dates with a modified Kolmogorov-Smirnov (K-S) hypothesis test. The test is modified to incoporate the analytical uncertainty of the zircon dates. Several "helper" functions are are also included. Some of the helper functions are called within the K-S test function, and others are included only for convenience. The final section of this script consists of code demonstrating how to apply the K-S test to two samples. Please cite XX if you wish to include a version of this code or its outputs in any publication or presentation, and please refer to XX for detailed discussion of the methods applied here.
+
+---- Packages ----
+The following packages are necessary for the functions in this script to run.
+```{r}
+library(tidyverse)
+library(ggthemes)
+library(pracma)
+```
+
+
+---- Functions ----
+
+Omit Xenocrsyts: This function (omit.xeno) uses the slope of the cdf between dates to determine and isolate xenocrystic dates
+```{r}
+# This function removes possible xenocrysts from a set of ID-TIMS zircon ages with 2 sigma analytical uncertainties. It categorizes a date as a xenocryst based on the slope of the cdf between the date and the previous date (dates are automatically sorted). It returns a vector of values in x identified as xenocrysts, and a dataframe of x and ux values with xenocrysts omitted. If no xenocrysts are identified, it prints a message saying as much.
+  # In order to use this function you need the get.cdf function and the tidyverse package installed
+  
+  # Arugments:
+  # x: a vector of ages
+  # ux: a vector of *2 sigma* uncertainties the same length as x
+  # thresh: the maximum slope between a xenocryst and the next oldest date
+  
+  # Things to consider when assigning thresh: 
+  # This is a slope threshold, where the slope is the difference in cumulative density over the difference in date. When the slope between two dates is less than this value, the older date and all dates older than it will be categorized as xenocrysts. For two dates with uncertainties that do not overlap, the numerator of the slope is ~1. The choice of the denominator in thresh is most important, because this is effectively the maximum permissible age gap between dates. The default denominator is 0.45, as in 450 kyr.
+  
+
+omit.xeno <- function (x, ux, thresh = 1/0.45) {
+
+  # Tidy the data
+  x <- na.omit(x)
+  ux <- na.omit(ux) #this is assumed to be 2 sigma!
+  n.x <- length(x)
+  
+  # Check that there are enough observations to reasonably perform this function (6 is subjective, but be thoughtful if decreasing it)
+  if (n.x <= 6) {
+    warning("Xenocrysts cannot be identified due to undersampling (n is less than 7)") 
+    stop()
+  }
+  
+  # Check for duplicates
+  if (length(unique(x)) < n.x) {
+    warning("There are ties within your sample, which prevents the xenocryst filter form working. Consider using more significant figures in your inputs.")
+    stop()
+  }
+  
+  # Move data into a dataframe and sort it by date going from youngest to oldest
+  d <- data.frame(x, ux)
+  d <- d |>
+    arrange(x)
+  
+  # Make a vector for xenocrysts to go in, and a xeno status variable
+  xeno <- vector()
+  have_xeno <- FALSE
+  
+  # Starting with the second youngest date, compare the slope of the cdf between each date and the previous to thresh. 
+  # If a slope lower than thresh is found, put the current date and all older dates into the xenocryst vector and break the loop.
+  for (i in 2:n.x) {
+    x_current = d$x[i]
+    x_prev = d$x[i - 1]
+    
+    cdf_current = get.cdf(x_current, d$x, d$ux/2)
+    cdf_prev = get.cdf(x_prev, d$x, d$ux/2)
+    
+    slope = (cdf_current - cdf_prev)/(x_current - x_prev)
+    
+    if (slope <= thresh) {
+      have_xeno = TRUE
+      xeno = append(xeno, d$x[i:n.x])
+      break
+    }
+  }
+  
+  if (have_xeno == TRUE) {
+    filtered_data <- d |>
+      filter(
+        !(x %in% xeno)
+      )
+    
+    result <- list("xenocrysts" = xeno,
+                   "filtered_data" = filtered_data)
+    
+    return(result)
+    
+  } else {result = "No xenocrysts here!"}
+
+}
+```
+
+
+Get CDF: This function (get.cdf) uses the cdf of a dataset to output the cd at a given value (d)
+```{r}
+# This function returns the cumulative density or probability for a given value (d) based on a sample (mu) and it associated uncertainties (sigma). Each mu and sigma pair is treated as a normal distribution and the computed cdf is a mix of these normal distributions.
+# Several other functions in this script call this function internally.
+# The pracma ("Practical Math") package is necessary to run this function.
+
+# Arguments:
+# d: the point along a continuous variable that you want the cumulative density or probability for
+# mu: a vector of means, presumably dates
+# sigma: a vector of *1 sigma* analyitcal uncertainties, the same length as mu
+# norm: a logical value; if TRUE the function will return the cumulative probability (a number between 0 and 1); if FALSE the function will return a cumulative density (a number between 0 and the length of mu).
+
+get.cdf <- function(d, mu, sigma, norm = FALSE) {
+  p = matrix(nrow = length(mu), ncol = 1)
+    for (i in 1:length(mu)) {
+      p[i] = (0.5*(1 + erf((d - mu[i])/(sigma[i]*sqrt(2)))))
+    }
+  if (norm == TRUE) {
+    return(sum(p)/length(mu))
+  } else { return(sum(p)) }
+}
+```
+
+
+Get PDF: This function (get.pdf) uses the pdf of a dataset to output the pd at a given value (d)
+```{r}
+# This function returns the probability density for a given value (d) based on a sample (mu) and it associated uncertainties (sigma). Each mu and sigma pair is treated as a normal distribution and the computed pdf is a mix of these normal distributions.
+# Several other functions in this script call this function internally.
+# The pracma ("Practical Math") package is necessary to run this function.
+
+# Arguments:
+# d: the point along a continuous variable that you want the probability density of
+# mu: a vector of means, presumably dates
+# sigma: a vector of *1 sigma* analyitcal uncertainties, the same length as mu
+
+get.pdf <- function(d, mu, sigma) {
+  p = matrix(nrow = length(mu), ncol = 1)
+    for (i in 1:length(mu)) {
+      p[i] = (1/length(mu))*(1/(sigma[i]*sqrt(2*pi)))*(exp((-(d-mu[i])^2)/(2*(sigma[i]^2))))
+    }
+   return(sum(p)) 
+}
+```
+
+
+See CDF: This function (see.cdf) allows you to quickly visualize the cdf of a dataset with analytical uncertainty incorporated, with or without a xenocryst filter applied. 
+```{r}
+# This function computes the cdf or cpf across an appropriate range and puts a ggplot of this distribution into the global environment (called cdf_plot). The points on the plot show where mean values exist.
+# The tidyverse package and get.cdf function are necessary for this function.
+
+# Arguments:
+# x: a vector of means, presumably dates
+# ux: a vector of *2 sigma* analytical uncertainties the same length as x
+# filter: a logical value; if TRUE the data are essentially processed through the omit.xeno function before the plot is created so that xenocrysts are excluded from it; if FALSE all data will be included in the plot
+# thresh: a numerical value or expression; this is only used if filter = TRUE; thresh is the maximum slope between two dates for which the older date will be categorized as a xenocryst. This is approximately 1/max-age-gap.
+# norm: a logical value; if TRUE the plot will show the cumulative probability (the y-axis will span from 0 to 1); if FALSE the plot will show the cumulative density (the y-axis will span from 0 to the length of x)
+
+see.cdf <- function(x, ux, filter = FALSE, thresh = 1/0.45, norm = FALSE) {
+  
+  # Tidy the data
+  x = na.omit(x)
+  ux <- na.omit(ux) #this is assumed to be 2 sigma!
+  ux = ux/2
+  n.x = length(x)
+
+  # Omit Xenocryts if applicable
+  if (filter == TRUE) {
+  have_xeno = FALSE
+  xeno = vector()
+  
+  filter_result <- omit.xeno(x = x, ux = ux, thresh = thresh)
+  
+  have_xeno = is.list(filter_result)
+  
+  if (have_xeno) {
+    x = filter_result$filtered_data$x
+    ux = filter_result$filtered_data$ux
+    xeno = filter_result$xenocrysts
+  }
+  }
+
+  # Calculate a resonable range for the x-axis
+  min = min(x) - 3*max(ux)
+  max = max(x) + 3*max(ux)
+  age_space = seq(min, max, 0.001)
+  
+  # Calculate the cdf or cdp across the x-axis range
+  if (norm == TRUE) {
+    x_densities <- sapply(age_space, get.cdf, mu = x, sigma = ux, norm = TRUE)
+    x_points <- sapply(x, get.cdf, mu = x, sigma = ux, norm = TRUE)
+  } else {
+    x_densities <- sapply(age_space, get.cdf, mu = x, sigma = ux, norm = FALSE)
+    x_points <- sapply(x, get.cdf, mu = x, sigma = ux, norm = FALSE)
+  }
+  
+
+  # Make the plot
+  cdf_plot <- ggplot() + 
+    geom_line(aes(x = age_space, y = x_densities), color = "red") +
+    geom_point(aes(x = x, y = x_points)) + 
+    labs(
+      x = "date (Ma)",
+      y = ifelse(test = norm, "cumulative probability", "cumulative density")
+    )
+  
+  # Place the plot in the global environment
+  assign("cdf_plot", cdf_plot, envir = .GlobalEnv)
+  
+  # Print a vector of any xenocryts omitted
+  if (filter == TRUE) {print(xeno)}
+   
+  
+}
+```
+
+
+See PDF: This function (see.pdf) allows you to quickly visualize the pdf of a dataset with analytical uncertainty incorporated, with or without xenocryst filter applied.
+```{r}
+# This function computes the pdf across an appropriate range and puts a ggplot of this distribution into the global environment (called pdf_plot). The points on the plot show where mean values exist.
+# The tidyverse package, get.pdf and omit.xeno functions are necessary for this function.
+
+# Arguments:
+# x: a vector of means, presumably dates
+# ux: a vector of *2 sigma* analytical uncertainties the same length as x
+# filter: a logical value; if TRUE the data are processed through the omit.xeno function before the plot is created so that xenocrysts are excluded from it; if FALSE all data will be included in the plot
+# thresh: a numerical value or expression; this is only used if filter = TRUE; thresh is the maximum slope between two dates for which the older date will be categorized as a xenocryst. This is approximately 1/max-age-gap.
+
+see.pdf <- function(x, ux, filter = FALSE, thresh = (1/0.45)) {
+  
+  # Tidy the data
+  x = na.omit(x)
+  ux <- na.omit(ux) #this is assumed to be 2 sigma!
+  n.x = length(x)
+
+  # Omit Xenocryts if applicable
+  if (filter == TRUE) {
+  have_xeno = FALSE
+  xeno = vector()
+  
+  filter_result <- omit.xeno(x = x, ux = ux, thresh = thresh)
+  
+  have_xeno = is.list(filter_result)
+  
+  if (have_xeno) {
+    x = filter_result$filtered_data$x
+    ux = filter_result$filtered_data$ux
+    xeno = filter_result$xenocrysts
+  }
+  
+  }
+
+  # Calculate a reasonable range for the x-axis
+  min = min(x) - 3*max(ux/2)
+  max = max(x) + 3*max(ux/2)
+  age_space = seq(min, max, 0.001)
+  
+  # Calculate the pdf across the x-axis range
+  x_densities <- sapply(age_space, get.pdf, mu = x, sigma = ux/2)
+  x_points <- sapply(x, get.pdf, mu = x, sigma = ux/2)
+  
+  
+
+  # Make the plot
+  pdf_plot <- ggplot() + 
+    geom_line(aes(x = age_space, y = x_densities), color = "red") +
+    geom_point(aes(x = x, y = x_points)) + 
+    labs(
+      x = "date (Ma)",
+      y = "probability density"
+    )
+  
+  # Place the plot in the global environment
+  assign("pdf_plot", pdf_plot, envir = .GlobalEnv)
+  
+  # Print a vector of any xenocryts omitted
+  if (filter == TRUE) {print(xeno)}
+   
+  
+}
+```
+
+
+Uncertain K-S: This function (unc.ks) performs a K-S on two samples incorporating the analytical uncertainties on the observations
+```{r}
+# This function performs a two-sample two-sided K-S test on data with analytical uncertainties by computing cdfs of the samples with the analytical uncertainties incorporated. It returns an htest object including the test statistic, the exact p-value, the date which yielded the test statistic, the name of the test performed, the alternative hypothesis, and the combined n of the two samples. If filter = TRUE, it will also return vectors identifying which dates were categorized and xenocrysts and omitted. If graph = TRUE it will place a ggplot (called cdf_plot) into the global environment showing the cdfs of both samples, where the K-S test "checked" the differences between the cdfs, and where the largest difference was identified (this is what the p-value is calculated form and is called the "winner date"). The functions omit.xeno, get.cdf, and see.cdf are necessary for full use of this function.
+
+# IMPORTANT: This function cannot perform a 1-sample test or a 1-sided test. It also cannot compute an approximate p-value and it will return a warning if your data include ties. A tie in this context means you have a value in x that is identical to a value in y. For ID-TIMS data this can be usually be avoided by including more significant figures in the inputs, and it is not of major concern because precise geochronologic data are continuous. However, this test should not be applied to any kind of non-continuous data.
+
+# EXTRA IMPORTANT: This function will only run on MacOS. To run on a PC, consider removing the lines below wich calculate a p-value, and instead use published tables to determine the p-value from the test statistic, D (variable name below is 'stat').
+
+# Arguments:
+# x: a vector of means, presumably dates
+# ux: a vector of *2 sigma* analytical uncertainties the same length as x
+# y: a vector of means, presumably dates, different form x
+# uy: a vector of *2 sigma* analytical uncertainties the same length as y
+# filter: a logical value; if TRUE the function will omit xenocrysts from the data before performing the test; if FALSE all data will be included in the test
+# thresh: a numerical value or expression; this is only used if filter = TRUE; thresh is the maximum slope between two dates for which the older date will be categorized as a xenocryst. This is approximately 1/max-age-gap.
+# graph: a logical value; if TRUE the graph described above will be created; if FALSE the graph will not be created
+
+
+
+unc.ks <- function(x, ux, y, uy, filter = FALSE, thresh = 1/0.45, graph = TRUE) {
+  
+  # Tidy the data
+  x <- na.omit(x)
+  ux <- na.omit(ux) #this is assumed to be 2 sigma!
+  y <- na.omit(y)
+  uy <- na.omit(uy) #this is assumed to be 2 sigma!
+  n.x <- length(x)
+  n.y <- length(y)
+  
+  # Check that there are enough observations to reasonably perform this function (6 is subjective, but be thoughtful if decreasing it)
+  if (n.x <= 6 | n.y <= 6) {
+    warning("This test is less robust for very low n in either sample. It is not advisable to compare samples with fewer than 7 observations.") 
+  }
+  
+  # Filter out xenocrysts if applicable
+  if (filter == TRUE) {
+  have_xeno_x <- FALSE
+  have_xeno_y <- FALSE
+  xeno_x <- vector()
+  xeno_y <- vector()
+  
+  filter_result_x <- omit.xeno(x = x, ux = ux, thresh = thresh)
+  filter_result_y <- omit.xeno(x = y, ux = uy, thresh = thresh)
+  
+  have_xeno_x = is.list(filter_result_x)
+  have_xeno_y = is.list(filter_result_y)
+  
+  if (have_xeno_x) {
+    x = filter_result_x$filtered_data$x
+    ux = filter_result_x$filtered_data$ux
+    xeno_x = filter_result_x$xenocrysts
+    n.x = length(x)
+  }
+  if (have_xeno_y) {
+    y = filter_result_y$filtered_data$x
+    uy = filter_result_y$filtered_data$ux
+    xeno_y = filter_result_y$xenocrysts
+    n.y = length(y)
+  }
+  }
+  
+  
+  #### Run the K-S Test ###
+  
+  # Create a sorted vector with all the means
+  sample_pts <- sort(c(x, y))
+  
+  # Check for ties
+  if (length(unique(sample_pts)) < (n.x + n.y)) {
+     warning("Your data contain ties. Consider using more significant figures in your inputs so each value is unique and reruning this test. This function only computes exact p-values, even when ties are present. For context on the implications of this see: $$include refs")
+    #stop()
+  }
+  
+  # Calculate the cumulative probabilty at all mean positions for both samples' cdps
+  x_samples <- sapply(sample_pts, get.cdf, mu = x, sigma = ux/2, norm = TRUE)
+  y_samples <- sapply(sample_pts, get.cdf, mu = y, sigma = uy/2, norm = TRUE)
+  
+  # Negate the y cps to facilitate comparison with x cps
+  y_samples_n = -1*y_samples
+
+  # Calculate the test statistic
+  z <- (x_samples) + (y_samples_n) 
+  stat <- max(abs(z))  
+  
+  # Calculate the exact p-value
+  pval <- 1 - .Call(stats:::C_pSmirnov2x, stat, n.x, n.y) #use this line on Mac; haven't figured out how to get this to work on PC yet.
+  #pval <- 1 - .Call(stats:::C_pKolmogorov2x, stat, n.x, n.y) #--> doesn't work on PC
+  #pval <- 1 - .Call(stats:::pKolmogorov2x, stat, n.x, n.y) #--> doesn't work on PC
+  #PVAL <- 1 - .C("pKolmogorov2x", p = as.double(stat), as.integer(n.x), as.integer(n.y), PACKAGE = "stats")$p #--> doesn't work on PC
+  
+  
+  # Create the htest object
+  test_result <- list(
+                 statistic = stat,
+                 p.value = pval,
+                 winner_date = sample_pts[which(abs(z) == stat)],
+                 alternative = "two-sided",
+                 method = "Two-sample Kolmogorov-Smirnov test",
+                 n = length(sample_pts))
+  class(test_result) <- "htest"
+  
+  
+  
+  # Graph Results if applicable
+  if (graph == TRUE) {
+    
+    age_max = max(ifelse(max(x) >= max(y), max(x), max(y))) + max(ifelse(max(x) >= max(y), max(ux/2)*3, max(uy/2)*3))
+    age_min =  min(ifelse(min(x) <= min(y), min(x), min(y))) - min(ifelse(min(x) >= min(y), min(ux/2)*3, min(uy/2)*3))
+    age_space = seq(age_min, age_max, (age_max - age_min)/500)
+  
+    x_densities <- sapply(age_space, get.cdf, mu = x, sigma = ux/2, norm = TRUE)
+    y_densities <- sapply(age_space, get.cdf, mu = y, sigma = uy/2, norm = TRUE)
+    
+    mins <- matrix(nrow = length(sample_pts), ncol = 1)
+    maxs <- matrix(nrow = length(sample_pts), ncol = 1)
+    for (k in 1:length(sample_pts)) {
+      if (x_samples[k] <= y_samples[k]) {
+        mins[k] = x_samples[k]
+        maxs[k] = y_samples[k]
+      } else {
+        mins[k] = y_samples[k]
+        maxs[k] = x_samples[k]
+      }
+    }
+    
+    winner_spot <- which(abs(z) == stat)
+    
+    cdf_plot <- ggplot() + 
+      geom_line(aes(x = age_space, y = x_densities), color = "red") +
+      geom_line(aes(x = age_space, y = y_densities), color = "blue") +
+      geom_linerange(aes(x = sample_pts, ymin = mins, ymax = maxs)) +
+      geom_linerange(aes(x = sample_pts[winner_spot], ymin = mins[winner_spot], ymax = maxs[winner_spot]), color = "pink") +
+      labs(
+        title = "red = x; blue = y; pink = largest difference",
+        x = "date (Ma)",
+        y = "cumulative probability"
+      )
+    
+    assign("cdf_plot", cdf_plot, envir = .GlobalEnv)
+  }
+  
+  # Build the output result
+  result <- list("test results" = test_result)
+  if (filter == TRUE) {
+    outliers = list("x xenocrysts" = xeno_x, 
+                    "y xenocrysts" = xeno_y)
+    result = append(result, outliers)
+  }
+ 
+  return(result) 
+}
+```
+
+
+Save all functions for loading into other scripts:
+```{r}
+save(get.cdf, get.pdf, omit.xeno, see.cdf, see.pdf, unc.ks, file = "mod_ks_funcs.RDAT")
+#this will save them to your set working directory
+```
+
+
+---- Example Application Code ---
+
+Run unc.ks on two samples
+```{r}
+dates_s1 <- c(90.301,	89.891,	89.84,	89.753,	89.74,	89.72,	89.64,	89.04,	89.003,	88.78) # these need to be in Ma
+unc_s1 <- dates_s1 * 0.015 # these need to be 2-sigma and in Ma
+
+dates_s2 <- c(90.115,	88.515,	88.481,	88.482,	88.478,	88.427,	88.343)
+unc_s2 <- dates_s2 * 0.015 # these need to be 2-sigma and in Ma
+
+mytest <- unc.ks(x = dates_s1, ux = unc_s1, y = dates_s2, uy = unc_s2, filter = TRUE, thresh = (1/0.450), graph = TRUE)
+
+cdf_plot + theme_few(base_size = 19)
+
+mytest #this line just gets it to print the results in the console
+```
+
+
+save your results to an RDAT file in your working directory:
+```{r}
+myresults <- list()
+myresults[["test"]] <- mytest
+myresults[["plot"]] <- cdf_plot
+save(myresults, file = "myresults.RDAT")
+```
+
+
